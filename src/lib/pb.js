@@ -115,18 +115,21 @@ export async function connectPlayer({
   // Round state + content: the server denormalizes the whole player-facing
   // payload onto the public rounds record, so one subscription carries
   // everything (and, at reveal, the tally + winning zones).
-  let currentIdx = -1;
+  // Staleness is judged by wall-clock creation time, not idx: the operator
+  // skip-to-round feature can jump backward to an earlier idx, and that must
+  // still win over whatever round was showing before the jump.
+  let currentCreated = "";
   const applyRound = (rec) => {
     if (!rec || !rec.payload || !inSession(rec)) return;
-    if (typeof rec.idx === "number" && rec.idx < currentIdx) return; // ignore stale older rounds
-    if (typeof rec.idx === "number") currentIdx = rec.idx;
+    if (rec.created && rec.created < currentCreated) return; // ignore stale older rounds
+    if (rec.created) currentCreated = rec.created;
     onRound && onRound(rec.payload);
   };
   try {
     const filter = sessionId ? `session=${q(sessionId)}` : "";
     const rows = await pb
       .collection("rounds")
-      .getFullList({ filter, sort: "-idx" });
+      .getFullList({ filter, sort: "-created" });
     if (rows[0]) applyRound(rows[0]);
   } catch {
     // no round opened yet
@@ -180,6 +183,9 @@ export async function connectListener({ onRound, onScores, onZoneCounts }) {
   const pb = new PocketBase(await ensurePocketbaseUrl());
 
   // Active session id first, so round/score reads scope to the current show.
+  // Kept live via subscription too: if the runner starts a new session while
+  // this page is already open, sessionId must move with it or every
+  // subsequent update gets filtered out by inSession below.
   let sessionId = null;
   try {
     const rows = await pb.collection("game_state").getFullList({ sort: "-updated_at" });
@@ -187,19 +193,25 @@ export async function connectListener({ onRound, onScores, onZoneCounts }) {
   } catch {
     // No game_state yet (fresh instance): show everything unscoped.
   }
+  pb.collection("game_state").subscribe("*", (e) => {
+    if (e.record?.session_id) sessionId = e.record.session_id;
+  });
 
   const inSession = (rec) => !sessionId || !rec.session || rec.session === sessionId;
 
-  let currentIdx = -1;
+  // Staleness is judged by wall-clock creation time, not idx: the operator
+  // skip-to-round feature can jump backward to an earlier idx, and that must
+  // still win over whatever round was showing before the jump.
+  let currentCreated = "";
   const applyRound = (rec) => {
     if (!rec || !rec.payload || !inSession(rec)) return;
-    if (typeof rec.idx === "number" && rec.idx < currentIdx) return; // ignore stale older rounds
-    if (typeof rec.idx === "number") currentIdx = rec.idx;
+    if (rec.created && rec.created < currentCreated) return; // ignore stale older rounds
+    if (rec.created) currentCreated = rec.created;
     onRound && onRound(rec.payload);
   };
   try {
     const filter = sessionId ? `session=${q(sessionId)}` : "";
-    const rows = await pb.collection("rounds").getFullList({ filter, sort: "-idx" });
+    const rows = await pb.collection("rounds").getFullList({ filter, sort: "-created" });
     if (rows[0]) applyRound(rows[0]);
   } catch {
     // no round opened yet
