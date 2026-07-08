@@ -1,0 +1,63 @@
+import { init } from '../serverless.js';
+
+export default init((() => {
+function __memo(fn) {
+	let value;
+	return () => value ??= (value = fn());
+}
+
+return {
+	appDir: "_app",
+	appPath: "_app",
+	assets: new Set([]),
+	mimeTypes: {},
+	_: {
+		client: {start:"_app/immutable/entry/start.CJygf0lS.js",app:"_app/immutable/entry/app.SojuNgB_.js",imports:["_app/immutable/entry/start.CJygf0lS.js","_app/immutable/chunks/BhmWiK11.js","_app/immutable/chunks/Bk52_Fgx.js","_app/immutable/chunks/C8PMRDiW.js","_app/immutable/entry/app.SojuNgB_.js","_app/immutable/chunks/Bk52_Fgx.js","_app/immutable/chunks/-L4etScQ.js","_app/immutable/chunks/DkN7b1Df.js","_app/immutable/chunks/C8PMRDiW.js","_app/immutable/chunks/Ci3u9fcl.js","_app/immutable/chunks/B_oqjzEn.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:false},
+		nodes: [
+			__memo(() => import('../server/nodes/0.js')),
+			__memo(() => import('../server/nodes/1.js')),
+			__memo(() => import('../server/nodes/2.js')),
+			__memo(() => import('../server/nodes/3.js')),
+			__memo(() => import('../server/nodes/4.js'))
+		],
+		remotes: {
+			
+		},
+		routes: [
+			{
+				id: "/",
+				pattern: /^\/$/,
+				params: [],
+				page: { layouts: [0,], errors: [1,], leaf: 2 },
+				endpoint: null
+			},
+			{
+				id: "/listen",
+				pattern: /^\/listen\/?$/,
+				params: [],
+				page: { layouts: [0,], errors: [1,], leaf: 3 },
+				endpoint: null
+			},
+			{
+				id: "/p/[player_id]",
+				pattern: /^\/p\/([^/]+?)\/?$/,
+				params: [{"name":"player_id","optional":false,"rest":false,"chained":false}],
+				page: { layouts: [0,], errors: [1,], leaf: 4 },
+				endpoint: null
+			}
+		],
+		prerendered_routes: new Set([]),
+		matchers: async () => {
+			
+			return {  };
+		},
+		server_assets: {}
+	}
+}
+})());
+
+export const config = {
+	path: ["/*"],
+	excludedPath: ["/.netlify/*"],
+	preferStatic: true
+};
