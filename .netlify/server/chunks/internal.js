@@ -103,7 +103,7 @@ const options = {
     app: ({ head, body, assets, nonce, env }) => '<!doctype html>\n<html lang="de">\n  <head>\n    <meta charset="utf-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />\n    <title>KI-Blackbox</title>\n    ' + head + '\n  </head>\n  <body>\n    <div style="display: contents">' + body + "</div>\n  </body>\n</html>\n",
     error
   },
-  version_hash: "1igoyfm"
+  version_hash: "bl7od8"
 };
 async function get_hooks() {
   let handle;

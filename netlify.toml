@@ -1,3 +1,12 @@
 [build]
   command = "npm run build"
   publish = "build"
+
+[build.environment]
+  # PocketBase is the deployed frontend's only backend (issue #16); the URL
+  # must be baked in at build time or pb.js falls back to asking the game
+  # server, which this deploy can't reach. It must be https: the Netlify
+  # page is https, so browsers block any http (mixed-content) request.
+  # NOTE: this endpoint 503s until the PocketBase service in Coolify is
+  # given an https domain (Let's Encrypt works with sslip.io hosts).
+  VITE_POCKETBASE_URL = "https://pocketbase-dk4skckwkc88k0csg4o8ck4s.46.62.242.241.sslip.io"

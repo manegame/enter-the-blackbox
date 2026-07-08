@@ -8,7 +8,6 @@ function TaskListener($$renderer, $$props) {
     let reveal = null;
     let zoneCounts = {};
     let scores = {};
-    let zones = null;
     let connected = false;
     let lastCue = "waiting";
     let lastUpdatedAt = null;
@@ -28,7 +27,7 @@ function TaskListener($$renderer, $$props) {
       const rows = [
         {
           label: "Connection",
-          value: "Reconnecting"
+          value: "Connecting"
         },
         { label: "Last cue", value: lastCue },
         {
@@ -60,8 +59,7 @@ function TaskListener($$renderer, $$props) {
       round,
       reveal,
       zoneCounts,
-      scores,
-      zones
+      scores
     }));
     function formatClock(ts) {
       if (ts === null || ts === void 0) return "—";
@@ -92,7 +90,7 @@ function TaskListener($$renderer, $$props) {
       let row = each_array_1[$$index_1];
       $$renderer2.push(`<div class="meta svelte-12d3d8q"><div class="meta-label svelte-12d3d8q">${escape_html(row.label)}</div> <div class="meta-value svelte-12d3d8q">${escape_html(row.value)}</div></div>`);
     }
-    $$renderer2.push(`<!--]--> <div class="meta svelte-12d3d8q"><div class="meta-label svelte-12d3d8q">Tracking zones</div> <div class="meta-value svelte-12d3d8q">${escape_html("disabled")}</div></div> <div class="meta svelte-12d3d8q"><div class="meta-label svelte-12d3d8q">Audio source</div> <div class="meta-value svelte-12d3d8q">${escape_html("none")}</div></div></div> <div class="subsection-title svelte-12d3d8q">Zone counts</div> `);
+    $$renderer2.push(`<!--]--> <div class="meta svelte-12d3d8q"><div class="meta-label svelte-12d3d8q">Audio source</div> <div class="meta-value svelte-12d3d8q">${escape_html("none")}</div></div></div> <div class="subsection-title svelte-12d3d8q">Zone counts</div> `);
     if (zoneRows().length) {
       $$renderer2.push("<!--[0-->");
       $$renderer2.push(`<div class="bars svelte-12d3d8q"><!--[-->`);
