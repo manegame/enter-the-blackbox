@@ -7,38 +7,45 @@ actual show night, follow [`runbook.md`](runbook.md) instead.
 ## Prerequisites
 
 - Python 3.11+
-- A [TrackingBox](https://github.com/ale-rls/TrackingBox) checkout at the
-  pinned commit (see the [README](../README.md)), installed per its own
-  instructions. The mock backend is enough for everything below — no
-  camera or GPU needed.
+- No separate TrackingBox checkout is needed; the pinned source is included at
+  `services/trackingbox` in the monorepo.
 
 ## 1. Install
 
-From this repo's root.
+From the monorepo root.
 
 macOS/Linux:
 
 ```bash
-make venv
+pyenv install -s 3.11.13  # once, if using pyenv
+make setup
 ```
 
 Windows (PowerShell — the Makefile assumes POSIX paths, so run the steps
 directly):
 
 ```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\pip install -e ".[dev]"
+py -3.11 -m venv apps\runner\.venv
+apps\runner\.venv\Scripts\pip install -e "apps\runner[dev]"
+py -3.11 -m venv services\trackingbox\.venv
+services\trackingbox\.venv\Scripts\pip install -e "services\trackingbox[dev]"
 ```
 
 ## 2. Start TrackingBox
 
-From the TrackingBox checkout, pointing it at this repo's dev config —
-that config runs the mock backend (24 simulated people, no camera) with
-floor calibration and the `answer_a`/`answer_b`/`ritual` zones that
-`content/show.yaml` expects:
+From the monorepo root, run the embedded TrackingBox with the synthetic backend
+and all zones referenced by the show:
 
 ```bash
-audience-tracker serve --config <path-to-this-repo>/dev/trackingbox.config.json
+make tracking
+```
+
+Windows:
+
+```powershell
+Set-Location services\trackingbox
+.venv\Scripts\audience-tracker serve `
+  --config ..\..\apps\runner\dev\trackingbox.config.json --port 8000
 ```
 
 Check it's alive:
@@ -48,23 +55,23 @@ curl http://localhost:8000/health
 # {"status":"ok","pipeline":true,"pipeline_running":true}
 ```
 
-Already running a real TrackingBox (live camera, venue config)? That works
-too — the game server doesn't care which backend is behind `/ws`, but zone
-IDs in TrackingBox's config must then match `content/show.yaml` or startup
-validation will fail.
+For a real camera, run `make tracking-ml` once, then start with
+`make tracking TRACKER_CONFIG=/absolute/path/to/venue-config.json`. Its zone IDs
+must match `apps/runner/content/show.yaml` or validation will fail.
 
 ## 3. Start the game server
 
 macOS/Linux:
 
 ```bash
-make dev
+make runner
 ```
 
 Windows:
 
 ```powershell
-.venv\Scripts\python -m uvicorn server.app:app --reload --port 8100
+Set-Location apps\runner
+.venv\Scripts\python -m uvicorn server.app:app --port 8100
 ```
 
 On startup it connects to `ws://localhost:8000/ws`, loads
@@ -100,7 +107,16 @@ README's Development notes.
 
 ## 5. Run the tests
 
-macOS/Linux: `make test` &nbsp;·&nbsp; Windows: `.venv\Scripts\python -m pytest -q`
+macOS/Linux: `make test`
+
+Windows:
+
+```powershell
+Set-Location apps\runner
+.venv\Scripts\python -m pytest -q
+Set-Location ..\..\services\trackingbox
+.venv\Scripts\python -m pytest -q
+```
 
 No TrackingBox needed — the suite runs against built-in fakes.
 
@@ -121,12 +137,13 @@ All configuration is environment variables with sane defaults
 Example — enable ritual rebind for a dev session:
 
 ```bash
-RITUAL_ZONE_ID=ritual make dev
+RITUAL_ZONE_ID=ritual make runner
 ```
 
 ```powershell
 $env:RITUAL_ZONE_ID = 'ritual'
-.venv\Scripts\python -m uvicorn server.app:app --reload --port 8100
+Set-Location apps\runner
+.venv\Scripts\python -m uvicorn server.app:app --port 8100
 ```
 
 ## Where next

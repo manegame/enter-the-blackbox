@@ -9,12 +9,11 @@ terminal output before touching anything else.
 
 1. **Content is frozen.** See [Content freeze process](#content-freeze-process)
    below — do this the day before, not at showtime.
-2. **Camera is positioned and the venue calibration is saved** to
-   `config.json` in the TrackingBox checkout (see TrackingBox's own
-   `docs/floor_projection.md` if this hasn't been done yet for this venue).
-3. Confirm both machines/checkouts are on the versions you rehearsed with:
-   - TrackingBox: pinned commit in this repo's [README](../README.md).
-   - This repo: whatever tag/commit you rehearsed the show on.
+2. **Camera is positioned and the venue calibration is saved** to a local
+   `config.json` (see `services/trackingbox/docs/floor_projection.md` from the
+   monorepo root if this hasn't been done yet for this venue).
+3. Confirm the monorepo is on the tag/commit rehearsed for this show. It already
+   contains the compatible TrackingBox revision.
 
 ## Start order
 
@@ -31,13 +30,11 @@ server retries the connection), but it makes the first couple of minutes
 of logs confusing.
 
 ```bash
-# 1. Personal audio, from blackbox-icecast. Its AUDIO_DIR points at this
-# repo's content/audio directory.
-make up
-curl http://localhost:8300/health
+# 1. Public personal audio
+curl https://audio.example.org/health
 
-# 2. TrackingBox, from its own checkout, with the venue's calibrated config
-audience-tracker serve --config config.json --port 8000
+# 2. From the monorepo root, with the venue's calibrated config
+make tracking TRACKER_CONFIG=/absolute/path/to/venue-config.json
 
 # check it's alive before moving on:
 curl http://localhost:8000/health
@@ -45,10 +42,8 @@ curl http://localhost:8000/health
 #   pipeline_running:false means tracking died while the API stayed up — see
 #   "TrackingBox is up but nobody is being tracked" below.
 
-# 3. Game server, from this repo
-make dev
-# or, equivalently, with any RITUAL_ZONE_ID / tuning overrides for the night:
-RITUAL_ZONE_ID=ritual make dev
+# 3. In another terminal, from the monorepo root
+make runner
 
 curl http://localhost:8100/health
 #   {"status":"ok","tracking_connected":true,"tracking_ws_url":"..."}
@@ -140,7 +135,7 @@ To generate voice-overs with ElevenLabs, start the server with an API key
 (and usually a default voice):
 
 ```bash
-ELEVENLABS_API_KEY=... ELEVENLABS_VOICE_ID=... make dev
+ELEVENLABS_API_KEY=... ELEVENLABS_VOICE_ID=... make runner
 # optional: ELEVENLABS_MODEL_ID (default eleven_multilingual_v2, good German)
 ```
 
@@ -184,7 +179,7 @@ alive. This means a persistent camera fault (unplugged, driver crash).
 Check the TrackingBox terminal output, fix the camera connection, and
 restart TrackingBox.
 
-**Game server process dies.** Restart it (`make dev` again, or however
+**Game server process dies.** Restart it (`make runner` again, or however
 your venue script launches it). See
 [Crash recovery](#crash-recovery-what-actually-happens) — nothing is lost,
 but read that section once before showtime so a restart mid-round doesn't

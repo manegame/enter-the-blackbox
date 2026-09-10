@@ -11,7 +11,17 @@
     "enabled": true,
     "default_zone": "outside",
     "zones": [
-      {"id": "ritual", "label": "Ritual corner", "rect": [0, 0, 0.12, 0.12]}
+      {"id": "ritual", "label": "Ritual corner", "rect": [0, 0, 0.10, 0.10]},
+      {"id": "ring_center", "label": "Ring center", "rect": [0.68, 0.32, 0.84, 0.48]},
+      {"id": "ring_mid", "label": "Ring middle", "rect": [0.60, 0.24, 0.92, 0.56]},
+      {"id": "ring_outer", "label": "Ring outer", "rect": [0.52, 0.16, 1.00, 0.72]},
+      {"id": "cross_tl", "label": "Cross top left", "rect": [0.00, 0.16, 0.24, 0.44]},
+      {"id": "cross_tr", "label": "Cross top right", "rect": [0.24, 0.16, 0.48, 0.44]},
+      {"id": "cross_bl", "label": "Cross bottom left", "rect": [0.00, 0.44, 0.24, 0.72]},
+      {"id": "cross_br", "label": "Cross bottom right", "rect": [0.24, 0.44, 0.48, 0.72]},
+      {"id": "scale_left", "label": "Scale left", "rect": [0.00, 0.80, 0.33, 1.00]},
+      {"id": "scale_mid", "label": "Scale middle", "rect": [0.33, 0.80, 0.67, 1.00]},
+      {"id": "scale_right", "label": "Scale right", "rect": [0.67, 0.80, 1.00, 1.00]}
     ]
   },
   "pipeline": {

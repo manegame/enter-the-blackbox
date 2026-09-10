@@ -1,15 +1,15 @@
 # blackbox-runner
 
 Interactive theater game server for 40+ simultaneous players. Positions come
-from [TrackingBox](https://github.com/ale-rls/TrackingBox) (anonymous GIDs
-over REST + WebSocket); players answer questions by physically moving into
-floor zones.
+from the monorepo's [`services/trackingbox`](../../services/trackingbox)
+(anonymous GIDs over REST + WebSocket); players answer questions by physically
+moving into floor zones.
 
 TrackingBox is treated as a versioned, read-only sensor: this repo consumes
 its `/ws` and `/api/zones` endpoints and never modifies it for game features.
 
-**Pinned TrackingBox commit:** `95d092864ff8e24a2af9c33e662e547262692b04`
-(update this line, and re-validate the show, whenever the pin moves).
+**Imported TrackingBox commit:** `95d092864ff8e24a2af9c33e662e547262692b04`
+(update the subtree and re-validate the show whenever the pin moves).
 
 ## Architecture
 
@@ -92,19 +92,15 @@ docs/
 
 ## Development
 
-Requires Python 3.11+ and a running TrackingBox instance (mock backend is
-fine for all development and load testing):
+From the monorepo root, install both Python environments and start the embedded
+TrackingBox mock service:
 
 ```bash
-# in a TrackingBox checkout at the pinned commit — bare mock, no zones/floor
-audience-tracker serve --backend mock --port 8000
-
-# or, to exercise zone-based gameplay (answers require floor projection):
-audience-tracker serve --config /path/to/this/repo/dev/trackingbox.config.json --port 8000
-
-# in this repo — import the show content once, then boot
+make setup
+make tracking
+# in another terminal:
 make import-content
-make dev
+make runner
 ```
 
 `dev/trackingbox.config.json` enables calibration (an identity mapping, since
@@ -117,7 +113,7 @@ To enable ElevenLabs voice generation from the admin console, set
 `ELEVENLABS_API_KEY` (and usually `ELEVENLABS_VOICE_ID`; model defaults to
 `eleven_multilingual_v2`) — see `docs/runbook.md` for the workflow.
 
-`make dev` boots the game server against `ws://localhost:8000/ws`, loading
+`make runner` boots the game server against `ws://localhost:8000/ws`, loading
 the show from the game DB (validated against TrackingBox's `/api/zones` at
 startup — a content zone typo fails fast here rather than silently going
 unanswerable mid-show) and the admin dashboard at `/admin/`. The DB is
@@ -207,7 +203,7 @@ resolves them). `dev/trackingbox.config.json` defines a `ritual` zone in
 the top-left corner for local testing:
 
 ```bash
-RITUAL_ZONE_ID=ritual make dev
+RITUAL_ZONE_ID=ritual make runner
 ```
 
 Other tunables (see `server/config.py`): `REBIND_MAX_DISTANCE` (normalized
