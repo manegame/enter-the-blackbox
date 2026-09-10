@@ -1,0 +1,897 @@
+"""FastAPI entry point for the theater game server.
+
+Phase 0 connected to TrackingBox and mirrored its audience state. Phase 1
+added the player<->GID binding layer: claim flow, persisted state with crash
+recovery, and a minimal admin binding board. Phase 2 added the round/scoring
+engine and the player WebSocket. Phase 3 added the TouchDesigner round/cue
+WS. Phase 4 adds auto-rebind, the ritual rebind flow, and round-state crash
+recovery on top of Phase 1's binding-state recovery.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import re
+import uuid
+from pathlib import Path
+from typing import Literal, Optional
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from . import content_db, show_store, tts
+from .audio_bridge import AudioBridgeClient
+from .bindings import BindingError, BindingManager, PlayerState
+from .config import Settings
+from .content import ContentError, ShowContent
+from .engine import EngineError, GameEngine
+from .models import ZoneMap
+from .pocketbase_client import PocketBaseClient
+from .tracking_client import TrackingClient, fetch_zones
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+log = logging.getLogger("blackbox_runner.app")
+
+_POSITION_LOG_INTERVAL_S = 5.0
+# How often the server recomputes the claimable-GID list from in-memory
+# tracking/binding state. It only writes to PocketBase when the set actually
+# changed (publish_available_gids dedupes), so the phone's realtime
+# subscription still only fires on a real change; this is just the recompute
+# cadence, not a network poll.
+_AVAILABLE_GIDS_INTERVAL_S = 1.0
+_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+_PLAYER_BUILD = Path(__file__).resolve().parent.parent / "frontend" / "player" / "build"
+
+
+async def _log_positions_periodically(client: TrackingClient) -> None:
+    """Exit criterion for Phase 0: prove live positions are flowing."""
+    while True:
+        await asyncio.sleep(_POSITION_LOG_INTERVAL_S)
+        people = client.get_all()
+        visible = sum(1 for p in people.values() if p.visible)
+        log.info("tracking: %d active GID(s)%s", visible, _sample(people))
+
+
+def _sample(people: dict) -> str:
+    if not people:
+        return ""
+    gid, state = next(iter(people.items()))
+    return f" (e.g. gid={gid} floor={state.floor} zone={state.zone})"
+
+
+async def _watch_for_ritual_prompts(
+    bindings: BindingManager, engine: GameEngine, ritual_zone_id: Optional[str]
+) -> None:
+    """Bridges bindings.py's orphan transitions to the TD/player cue channel.
+
+    Kept out of bindings.py to avoid coupling the binding state machine to
+    the round engine's pub/sub — this is the one place both are in scope.
+    """
+    if ritual_zone_id is None:
+        return
+    queue = bindings.subscribe()
+    try:
+        while True:
+            player = await queue.get()
+            if player.state == PlayerState.ORPHANED:
+                engine.publish_cue(
+                    "ritual_prompt", {"player_id": player.id, "corner_zone": ritual_zone_id}
+                )
+    finally:
+        bindings.unsubscribe(queue)
+
+
+async def _publish_available_gids(
+    db: PocketBaseClient,
+    bindings: BindingManager,
+    tracking: TrackingClient,
+    session_id: str,
+) -> None:
+    """Keep PocketBase's ``game_state.available_gids`` in sync with the GIDs
+    that are tracked but unbound — the numbers a phone is allowed to claim
+    (issue #16). The deployed player frontend, which can't reach this server,
+    subscribes to that list over PocketBase realtime.
+
+    Recompute is cheap (in-memory state) and the write is a no-op when the
+    set is unchanged, so the phone only ever sees genuine changes.
+    """
+    while True:
+        try:
+            bound = bindings.bound_gids()
+            available = [
+                gid
+                for gid, state in tracking.get_all().items()
+                if state.visible and gid not in bound
+            ]
+            await db.publish_available_gids(session_id, available)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Failed to publish available_gids")
+        await asyncio.sleep(_AVAILABLE_GIDS_INTERVAL_S)
+
+
+async def _publish_zone_counts(
+    db: PocketBaseClient, engine: GameEngine, session_id: str
+) -> None:
+    """Mirror the live per-zone headcount into PocketBase's ``live_stats``
+    singleton so the deployed /listen page — which can't reach this server's
+    /ws/td stream — still gets the moving zone-count bars. Same
+    recompute-then-deduped-write shape as _publish_available_gids: the write
+    is a no-op until someone actually changes zone.
+
+    Logs once per failure streak, not per attempt: live_stats is missing
+    entirely on instances whose pocketbase_bootstrap.py predates it, and a
+    traceback every second would drown the show logs."""
+    failing = False
+    while True:
+        try:
+            rt = engine.current
+            round_id = rt.content.id if rt is not None else None
+            await db.publish_zone_counts(
+                session_id, round_id, engine.current_zone_counts()
+            )
+            failing = False
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if not failing:
+                log.exception(
+                    "Failed to publish zone_counts (has scripts/"
+                    "pocketbase_bootstrap.py been run since live_stats was added?)"
+                )
+                failing = True
+        await asyncio.sleep(_AVAILABLE_GIDS_INTERVAL_S)
+
+
+async def _process_claim_request(
+    db: PocketBaseClient, bindings: BindingManager, record: dict
+) -> None:
+    """Perform one claim submitted by a phone through PocketBase, then write
+    the outcome back onto its ``claim_requests`` row so the phone (watching
+    that row) sees success or the exact error. Idempotent: a request already
+    satisfied resolves as done rather than tripping the already-bound guard,
+    so a redelivered realtime event or a reconnect catch-up is harmless."""
+    request_id = record.get("id")
+    if not request_id:
+        return
+    player_key = record.get("player_key") or ""
+    display_name = record.get("display_name") or None
+    try:
+        gid = int(record.get("gid"))
+    except (TypeError, ValueError):
+        await db.resolve_claim_request(request_id, "error", "Ungültige Nummer")
+        return
+
+    existing = bindings.get(player_key)
+    if existing is not None and existing.state == PlayerState.BOUND and existing.gid == gid:
+        await db.resolve_claim_request(request_id, "done", "")
+        return
+    try:
+        await bindings.claim(player_key, gid, display_name)
+    except BindingError as exc:
+        await db.resolve_claim_request(request_id, "error", str(exc))
+        return
+    await db.resolve_claim_request(request_id, "done", "")
+
+
+async def _consume_claim_requests(db: PocketBaseClient, bindings: BindingManager) -> None:
+    """Bridge the phone's PocketBase claim submissions to the real binding
+    layer. Each pass catches up on anything still pending (covering rows
+    created while the realtime stream was down), then follows the realtime
+    stream for new ones. On any stream error it reconnects and catches up
+    again, so no submission is lost."""
+    while True:
+        try:
+            for record in await db.load_pending_claim_requests():
+                await _process_claim_request(db, bindings, record)
+            async for _coll, action, record in db.realtime_events(["claim_requests"]):
+                if action in ("create", "update") and (
+                    record.get("status") or "pending"
+                ) == "pending":
+                    await _process_claim_request(db, bindings, record)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Claim-request consumer error; reconnecting: %s", exc)
+            await asyncio.sleep(1.0)
+
+
+async def _sync_audio_players(bindings: BindingManager, audio: AudioBridgeClient) -> None:
+    """Keep active ids registered, including after a remote bridge restart."""
+    active_states = {PlayerState.BOUND, PlayerState.LOST, PlayerState.ORPHANED}
+    queue = bindings.subscribe()
+
+    async def sync(player) -> None:
+        try:
+            await audio.set_active(player.id, player.state in active_states)
+        except Exception as exc:
+            log.warning("Could not sync audio stream for %s: %s", player.id, exc)
+
+    async def reconcile() -> None:
+        await asyncio.gather(*(sync(player) for player in bindings.all_players()))
+
+    try:
+        await reconcile()
+        while True:
+            try:
+                player = await asyncio.wait_for(queue.get(), timeout=10.0)
+                await sync(player)
+            except asyncio.TimeoutError:
+                # The bridge registry is intentionally in-memory. Reconcile
+                # periodically so a Coolify restart heals without a new claim.
+                await reconcile()
+    finally:
+        bindings.unsubscribe(queue)
+
+
+class ClaimRequest(BaseModel):
+    gid: int
+    display_name: Optional[str] = None
+
+
+class RebindRequest(BaseModel):
+    gid: int
+    actor: str = "operator"
+
+
+class CueRequest(BaseModel):
+    payload: dict = {}
+
+
+class StartRoundRequest(BaseModel):
+    # Omitted -> start the next round; set -> jump the show to that step.
+    index: Optional[int] = None
+
+
+class TTSRequest(BaseModel):
+    voice_id: Optional[str] = None
+
+
+class LiveAudioRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5000)
+    player_ids: list[str] = Field(default_factory=list)
+    voice_id: Optional[str] = None
+    mode: Literal["interrupt", "queue"] = "interrupt"
+
+
+_EMPTY_SHOW = ShowContent(rounds=[])
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or Settings.load()
+    tracking = TrackingClient(
+        settings.tracking_ws_url,
+        reconnect_initial_s=settings.reconnect_initial_s,
+        reconnect_max_s=settings.reconnect_max_s,
+        history_seconds=settings.position_history_seconds,
+    )
+    if not settings.pocketbase_admin_email or not settings.pocketbase_admin_password:
+        raise RuntimeError(
+            "PocketBase credentials missing — set POCKETBASE_ADMIN_EMAIL and "
+            "POCKETBASE_ADMIN_PASSWORD (see .env.example). The game server "
+            "cannot run without its persistence backend."
+        )
+    db = PocketBaseClient(
+        settings.pocketbase_url,
+        settings.pocketbase_admin_email,
+        settings.pocketbase_admin_password,
+    )
+    audio = (
+        AudioBridgeClient(
+            settings.audio_bridge_url,
+            settings.audio_bridge_token,
+            settings.audio_dir,
+        )
+        if settings.audio_bridge_url
+        else None
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Persistence first, and hard-fail: unlike tracking there is no
+        # degraded mode without it — no session, no crash recovery, nothing.
+        await db.connect()
+
+        tracking_task = asyncio.create_task(tracking.run())
+        try:
+            await tracking.wait_connected(timeout=10)
+        except (asyncio.TimeoutError, TimeoutError):
+            log.warning("TrackingBox not reachable at startup; will keep retrying in background")
+        try:
+            app.state.zones = await fetch_zones(settings.tracking_http_url)
+        except Exception as exc:  # pragma: no cover - network dependent
+            log.warning("Could not fetch zones from TrackingBox: %s", exc)
+            app.state.zones = ZoneMap(enabled=False, default_zone=None, zones=[])
+
+        session_id = await db.get_active_session_id()
+        if session_id is None:
+            session_id = await db.create_session()
+            log.info("Started new session %s", session_id)
+        else:
+            log.info("Resuming session %s (crash recovery)", session_id)
+        bindings = await BindingManager.load(
+            db,
+            session_id,
+            tracking,
+            rebind_max_distance=settings.rebind_max_distance,
+            rebind_max_gap_s=settings.rebind_max_gap_s,
+            orphan_after_s=settings.orphan_after_s,
+            ritual_zone_id=settings.ritual_zone_id,
+        )
+        app.state.bindings = bindings
+        app.state.session_id = session_id
+
+        try:
+            show = await content_db.load_show_db(
+                db, valid_zone_ids=app.state.zones.zone_ids()
+            )
+            log.info("Loaded show content: %d round(s) from database", len(show.rounds))
+        except ContentError as exc:
+            log.warning("Could not load show content (%s); round control disabled", exc)
+            show = _EMPTY_SHOW
+        app.state.show = show
+        app.state.engine = await GameEngine.load(
+            db,
+            session_id,
+            show,
+            bindings,
+            tracking,
+            audio_delivery=audio,
+        )
+
+        bindings_task = asyncio.create_task(bindings.run())
+        log_task = asyncio.create_task(_log_positions_periodically(tracking))
+        ritual_task = asyncio.create_task(
+            _watch_for_ritual_prompts(bindings, app.state.engine, settings.ritual_zone_id)
+        )
+        # Issue #16: the deployed phone reaches only PocketBase, so the server
+        # publishes the claimable-GID list there and consumes claim
+        # submissions back off the realtime stream.
+        gids_task = asyncio.create_task(
+            _publish_available_gids(db, bindings, tracking, session_id)
+        )
+        claim_task = asyncio.create_task(_consume_claim_requests(db, bindings))
+        zone_counts_task = asyncio.create_task(
+            _publish_zone_counts(db, app.state.engine, session_id)
+        )
+        audio_task = (
+            asyncio.create_task(_sync_audio_players(bindings, audio))
+            if audio is not None
+            else None
+        )
+        try:
+            yield
+        finally:
+            tracking.stop()
+            app.state.engine.shutdown()
+            bindings.shutdown()
+            for task in (
+                tracking_task, bindings_task, log_task, ritual_task, gids_task,
+                claim_task, zone_counts_task, audio_task,
+            ):
+                if task is None:
+                    continue
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            await db.close()
+            if audio is not None:
+                await audio.close()
+
+    app = FastAPI(title="Blackbox Runner", version="0.1.0", lifespan=lifespan)
+    # Permissive CORS so a standalone-deployed player frontend (SvelteKit
+    # static build with VITE_GAME_URL, docs in frontend/player) can call the
+    # API cross-origin. Consistent with the existing trust model: the admin
+    # API has no auth and the server lives on a venue LAN / private network.
+    app.add_middleware(
+        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    )
+    app.state.settings = settings
+    app.state.tracking = tracking
+    app.state.db = db
+    app.state.zones = ZoneMap(enabled=False, default_zone=None, zones=[])
+    app.state.bindings = None
+    app.state.session_id = None
+    app.state.show = _EMPTY_SHOW
+    app.state.engine = None
+    app.state.audio = audio
+
+    @app.get("/health")
+    async def health() -> dict:
+        result = {
+            "status": "ok",
+            "tracking_connected": tracking.connected,
+            "tracking_ws_url": settings.tracking_ws_url,
+            "personal_audio_configured": audio is not None,
+        }
+        if audio is not None:
+            result["personal_audio"] = await audio.health()
+        return result
+
+    @app.get("/api/tracking/audience")
+    async def debug_audience() -> list[dict]:
+        """Debug passthrough of the mirrored TrackingBox state."""
+        return [s.model_dump() for s in tracking.get_all().values()]
+
+    @app.get("/api/tracking/zones")
+    async def debug_zones() -> dict:
+        return app.state.zones.model_dump()
+
+    # -------------------------------------------------------------- #
+    # Players — claim flow
+    # -------------------------------------------------------------- #
+    @app.get("/api/players")
+    async def list_players() -> list[dict]:
+        return [p.to_dict() for p in app.state.bindings.all_players()]
+
+    @app.get("/api/players/{player_id}")
+    async def get_player(player_id: str) -> dict:
+        player = app.state.bindings.get(player_id)
+        if player is None:
+            raise HTTPException(status_code=404, detail=f"player {player_id!r} not found")
+        return player.to_dict()
+
+    @app.post("/api/players/{player_id}/claim")
+    async def claim_player(player_id: str, body: ClaimRequest) -> dict:
+        try:
+            player = await app.state.bindings.claim(player_id, body.gid, body.display_name)
+        except BindingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return player.to_dict()
+
+    # -------------------------------------------------------------- #
+    # Admin — binding board
+    # -------------------------------------------------------------- #
+    @app.post("/api/admin/players/{player_id}/rebind")
+    async def rebind_player(player_id: str, body: RebindRequest) -> dict:
+        try:
+            player = await app.state.bindings.operator_rebind(player_id, body.gid, actor=body.actor)
+        except BindingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return player.to_dict()
+
+    @app.websocket("/ws/admin")
+    async def ws_admin(websocket: WebSocket) -> None:
+        await websocket.accept()
+        bindings: BindingManager = app.state.bindings
+        queue = bindings.subscribe()
+        try:
+            await websocket.send_json(
+                {"type": "roster", "players": [p.to_dict() for p in bindings.all_players()]}
+            )
+            while True:
+                player = await queue.get()
+                await websocket.send_json({"type": "player_update", "player": player.to_dict()})
+        except WebSocketDisconnect:
+            pass
+        finally:
+            bindings.unsubscribe(queue)
+
+    # -------------------------------------------------------------- #
+    # Rounds & scoring
+    # -------------------------------------------------------------- #
+    @app.get("/api/rounds/current")
+    async def current_round() -> Optional[dict]:
+        engine: GameEngine = app.state.engine
+        rt = engine.current if engine else None
+        return engine.round_payload(rt) if rt else None
+
+    @app.get("/api/scores")
+    async def scores() -> dict:
+        engine: GameEngine = app.state.engine
+        return await engine.scores() if engine else {}
+
+    @app.post("/api/admin/content/reload")
+    async def reload_content() -> dict:
+        """Hot-reload the DB-stored show between rounds — e.g. after an
+        operator ran scripts/import_content.py against a live server
+        (docs/runbook.md's content freeze process covers when this is and
+        isn't safe to use).
+        """
+        try:
+            show = await content_db.load_show_db(
+                db, valid_zone_ids=app.state.zones.zone_ids()
+            )
+        except ContentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            app.state.engine.reload_show(show)
+        except EngineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        app.state.show = show
+        return {"ok": True, "rounds": len(show.rounds)}
+
+    # -------------------------------------------------------------- #
+    # Admin — show editor (the DB's content_rounds table is the source
+    # of truth; edits are written back there, not into the running
+    # engine. show.yaml is only the authoring copy, applied via
+    # scripts/import_content.py.)
+    # -------------------------------------------------------------- #
+    def _edit_zone_ids() -> Optional[set[str]]:
+        # Mirror startup validation when TrackingBox's zones are known, but
+        # don't block show prep on a dead sensor: without a zone map every
+        # option would look "unknown" and nothing could ever be saved.
+        zones: ZoneMap = app.state.zones
+        return zones.zone_ids() if zones.enabled else None
+
+    def _reload_engine(show: ShowContent) -> tuple[bool, Optional[str]]:
+        """Apply a freshly saved show to the engine if between rounds. The
+        DB write already happened either way — an edit made mid-round is
+        kept, it just applies on the next reload."""
+        try:
+            app.state.engine.reload_show(show)
+        except EngineError as exc:
+            return False, str(exc)
+        app.state.show = show
+        return True, None
+
+    def _pb_audio_url(round_id: str) -> Optional[str]:
+        """Public URL of a round's narration mp3 stored in PocketBase
+        (…/api/files/content_rounds/{record}/{filename}), or None if the
+        file was never uploaded there."""
+        info = db.content_file_info(round_id)
+        if not info:
+            return None
+        return f"{settings.pocketbase_url}/api/files/content_rounds/{info[0]}/{info[1]}"
+
+    @app.get("/api/admin/content")
+    async def get_content() -> dict:
+        try:
+            show = await content_db.load_show_db(db)
+        except ContentError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        audio_dir = Path(settings.audio_dir)
+        rounds = []
+        for r in show.rounds:
+            dump = r.model_dump()
+            # The canonical audio location is the PocketBase file; the
+            # game-served /audio path is only a fallback for rounds whose
+            # mp3 never made it into PocketBase.
+            dump["audio_url"] = _pb_audio_url(r.id) or (
+                f"/audio/{r.audio}" if r.audio else None
+            )
+            dump["audio_exists"] = bool(db.content_file_info(r.id)) or (
+                bool(r.audio) and (audio_dir / r.audio).is_file()
+            )
+            rounds.append(dump)
+        return {
+            "version": show.version,
+            "rounds": rounds,
+            "tts": {
+                "configured": bool(settings.elevenlabs_api_key),
+                "voice_id": settings.elevenlabs_voice_id,
+                "model_id": settings.elevenlabs_model_id,
+            },
+        }
+
+    @app.put("/api/admin/content/rounds/{round_id}")
+    async def update_round(round_id: str, fields: dict) -> dict:
+        try:
+            show = await show_store.update_round(
+                db,
+                round_id,
+                fields,
+                valid_zone_ids=_edit_zone_ids(),
+                audio_dir=settings.audio_dir,
+            )
+        except ContentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        reloaded, detail = _reload_engine(show)
+        updated = next(r for r in show.rounds if r.id == round_id)
+        return {"ok": True, "reloaded": reloaded, "detail": detail, "round": updated.model_dump()}
+
+    @app.post("/api/admin/content/rounds")
+    async def create_round(body: dict) -> dict:
+        new_round = body.get("round")
+        after_id = body.get("after_id")
+        if not isinstance(new_round, dict):
+            raise HTTPException(status_code=400, detail="body must include a 'round' object")
+        try:
+            show = await show_store.create_round(
+                db,
+                new_round,
+                after_id=after_id,
+                valid_zone_ids=_edit_zone_ids(),
+                audio_dir=settings.audio_dir,
+            )
+        except ContentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        reloaded, detail = _reload_engine(show)
+        created = next(r for r in show.rounds if r.id == new_round["id"])
+        return {"ok": True, "reloaded": reloaded, "detail": detail, "round": created.model_dump()}
+
+    @app.delete("/api/admin/content/rounds/{round_id}")
+    async def delete_round(round_id: str) -> dict:
+        try:
+            show = await show_store.delete_round(
+                db,
+                round_id,
+                valid_zone_ids=_edit_zone_ids(),
+                audio_dir=settings.audio_dir,
+            )
+        except ContentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        reloaded, detail = _reload_engine(show)
+        return {"ok": True, "reloaded": reloaded, "detail": detail, "rounds": len(show.rounds)}
+
+    @app.post("/api/admin/content/rounds/{round_id}/tts")
+    async def generate_round_audio(round_id: str, body: Optional[TTSRequest] = None) -> dict:
+        if not settings.elevenlabs_api_key:
+            raise HTTPException(
+                status_code=503,
+                detail="ElevenLabs is not configured — set ELEVENLABS_API_KEY",
+            )
+        # Read fresh from the DB, not the running engine: an edit saved
+        # mid-round (reloaded: false) must still be what gets narrated.
+        try:
+            show = await content_db.load_show_db(db)
+        except ContentError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        round_ = next((r for r in show.rounds if r.id == round_id), None)
+        if round_ is None:
+            raise HTTPException(status_code=404, detail=f"unknown round {round_id!r}")
+        text = round_.text or round_.question
+        if not text:
+            raise HTTPException(status_code=400, detail=f"round {round_id!r} has no text")
+        voice_id = (body.voice_id if body else None) or settings.elevenlabs_voice_id
+        if not voice_id:
+            raise HTTPException(
+                status_code=400,
+                detail="no voice selected — set ELEVENLABS_VOICE_ID or pass voice_id",
+            )
+
+        try:
+            audio_bytes = await tts.synthesize(
+                text,
+                api_key=settings.elevenlabs_api_key,
+                voice_id=voice_id,
+                model_id=settings.elevenlabs_model_id,
+            )
+        except tts.TTSError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        filename = f"{round_id}.mp3"
+        await asyncio.to_thread((Path(settings.audio_dir) / filename).write_bytes, audio_bytes)
+        show = await show_store.update_round(
+            db,
+            round_id,
+            {"audio": filename},
+            valid_zone_ids=_edit_zone_ids(),
+            audio_dir=settings.audio_dir,
+        )
+        reloaded, detail = _reload_engine(show)
+        return {
+            "ok": True,
+            "audio": filename,
+            "audio_url": _pb_audio_url(round_id) or f"/audio/{filename}",
+            "bytes": len(audio_bytes),
+            "reloaded": reloaded,
+            "detail": detail,
+        }
+
+    @app.get("/api/admin/audio/status")
+    async def audio_status() -> dict:
+        if audio is None:
+            return {"configured": False, "ok": False, "players": [], "flagged": []}
+        try:
+            status, health = await asyncio.gather(audio.status(), audio.health())
+            return {
+                "configured": True,
+                **status,
+                "ok": bool(health.get("ok")),
+                "health": health,
+            }
+        except Exception as exc:
+            return {
+                "configured": True,
+                "ok": False,
+                "error": str(exc),
+                "players": [],
+                "flagged": [],
+            }
+
+    @app.post("/api/admin/audio/tts-play")
+    async def generate_and_play_live_audio(body: LiveAudioRequest) -> dict:
+        """Generate an ad-hoc announcement and inject it into personal streams."""
+        if audio is None:
+            raise HTTPException(503, "personal audio is not configured — set AUDIO_BRIDGE_URL")
+        if not settings.elevenlabs_api_key:
+            raise HTTPException(503, "ElevenLabs is not configured — set ELEVENLABS_API_KEY")
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(400, "text must not be empty")
+        voice_id = body.voice_id or settings.elevenlabs_voice_id
+        if not voice_id:
+            raise HTTPException(400, "no voice selected — set ELEVENLABS_VOICE_ID or pass voice_id")
+
+        players = app.state.bindings.all_players()
+        known = {player.id for player in players}
+        active_states = {PlayerState.BOUND, PlayerState.LOST, PlayerState.ORPHANED}
+        active = sorted(player.id for player in players if player.state in active_states)
+        targets = list(dict.fromkeys(body.player_ids)) if body.player_ids else active
+        unknown = [player_id for player_id in targets if player_id not in known]
+        if unknown:
+            raise HTTPException(400, f"unknown player id(s): {', '.join(unknown)}")
+        if not targets:
+            raise HTTPException(400, "there are no players to receive this audio")
+
+        try:
+            audio_bytes = await tts.synthesize(
+                text,
+                api_key=settings.elevenlabs_api_key,
+                voice_id=voice_id,
+                model_id=settings.elevenlabs_model_id,
+            )
+        except tts.TTSError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        safe_prefix = re.sub(r"[^A-Za-z0-9_-]+", "-", text[:32]).strip("-") or "message"
+        filename = f"live-{safe_prefix}-{uuid.uuid4().hex[:8]}.mp3"
+        await asyncio.to_thread((Path(settings.audio_dir) / filename).write_bytes, audio_bytes)
+        results = await audio.play_many(targets, filename, body.mode)
+        failures = {pid: error for pid, error in results.items() if error}
+        return {
+            "ok": not failures,
+            "audio": filename,
+            "bytes": len(audio_bytes),
+            "targets": targets,
+            "delivered": [pid for pid, error in results.items() if error is None],
+            "failures": failures,
+        }
+
+    @app.post("/api/admin/rounds/start")
+    async def start_round(body: Optional[StartRoundRequest] = None) -> dict:
+        try:
+            if body is not None and body.index is not None:
+                rt = await app.state.engine.start_round_at(body.index)
+            else:
+                rt = await app.state.engine.start_next_round()
+        except EngineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return app.state.engine.round_payload(rt)
+
+    @app.post("/api/admin/rounds/close")
+    async def close_round() -> dict:
+        try:
+            rt = await app.state.engine.close_round()
+        except EngineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return app.state.engine.round_payload(rt)
+
+    @app.post("/api/admin/rounds/reveal")
+    async def reveal_round() -> dict:
+        try:
+            rt = await app.state.engine.reveal_round()
+        except EngineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return app.state.engine.round_payload(rt)
+
+    @app.websocket("/ws/player/{player_id}")
+    async def ws_player(websocket: WebSocket, player_id: str) -> None:
+        await websocket.accept()
+        engine: GameEngine = app.state.engine
+        queue = engine.subscribe()
+        try:
+            rt = engine.current
+            await websocket.send_json(
+                {
+                    "type": "hello",
+                    "round": engine.round_payload(rt) if rt else None,
+                    "scores": await engine.scores(),
+                }
+            )
+            while True:
+                event = await queue.get()
+                payload = dict(event.payload)
+                if event.type == "reveal":
+                    answer = engine.player_answer(player_id)
+                    payload["your_answer"] = {"zone": answer[0], "resolved": answer[1]} if answer else None
+                elif event.type == "scores_updated":
+                    payload["your_score"] = payload["scores"].get(player_id, 0)
+                await websocket.send_json({"type": event.type, **payload})
+        except WebSocketDisconnect:
+            pass
+        finally:
+            engine.unsubscribe(queue)
+
+    # -------------------------------------------------------------- #
+    # TouchDesigner — round/cue WS (docs/touchdesigner.md)
+    # -------------------------------------------------------------- #
+    @app.post("/api/admin/cues/{cue_type}")
+    async def fire_cue(cue_type: str, body: Optional[CueRequest] = None) -> dict:
+        """Manually fire a named cue to every /ws/td (and /ws/player) listener.
+        Used for tech rehearsal and for cues that don't yet have an automatic
+        trigger — e.g. 'ritual_prompt' ahead of Phase 4's real ritual flow.
+        """
+        payload = body.payload if body else {}
+        app.state.engine.publish_cue(cue_type, payload)
+        return {"ok": True, "cue": cue_type, "payload": payload}
+
+    @app.websocket("/ws/td")
+    async def ws_td(websocket: WebSocket) -> None:
+        await websocket.accept()
+        engine: GameEngine = app.state.engine
+        queue = engine.subscribe()
+        try:
+            rt = engine.current
+            await websocket.send_json(
+                {
+                    "type": "hello",
+                    "round": engine.round_payload(rt) if rt else None,
+                    "zone_counts": engine.current_zone_counts(),
+                    "zones": app.state.zones.model_dump(),
+                }
+            )
+            while True:
+                event = await queue.get()
+                await websocket.send_json({"type": event.type, **event.payload})
+        except WebSocketDisconnect:
+            pass
+        finally:
+            engine.unsubscribe(queue)
+
+    # -------------------------------------------------------------- #
+    # Web: player/listen pages + admin dashboard
+    # -------------------------------------------------------------- #
+    @app.get("/api/config")
+    async def client_config() -> dict:
+        """Runtime config the browser needs — currently just where the
+        player frontend's PocketBase realtime subscriptions should point.
+        Public values only; never credentials."""
+        return {
+            "pocketbase_url": settings.pocketbase_url,
+            "audio_stream_base": settings.audio_public_url,
+        }
+
+    # The SvelteKit build (frontend/player, issue #17) is a pure SPA:
+    # every route serves the same fallback index.html and resolves
+    # client-side. web/player/index.html stays as the archived fallback
+    # when no build exists (e.g. a fresh checkout without Node).
+    _spa_index = _PLAYER_BUILD / "index.html"
+
+    @app.get("/p/{player_id}")
+    async def player_page(player_id: str) -> FileResponse:
+        if _spa_index.is_file():
+            return FileResponse(_spa_index)
+        return FileResponse(_WEB_DIR / "player" / "index.html")
+
+    @app.get("/listen")
+    async def listen_page() -> FileResponse:
+        if _spa_index.is_file():
+            return FileResponse(_spa_index)
+        return FileResponse(_WEB_DIR / "player" / "index.html")
+
+    if _spa_index.is_file():
+
+        @app.get("/")
+        async def player_entry() -> FileResponse:
+            """The one link to hand to every new audience member: the app
+            assigns them a sticky seat id and redirects to /p/{id}."""
+            return FileResponse(_spa_index)
+
+        # SvelteKit's hashed assets live under /_app.
+        app.mount(
+            "/_app",
+            StaticFiles(directory=_PLAYER_BUILD / "_app"),
+            name="player-assets",
+        )
+
+    if (_WEB_DIR / "admin").is_dir():
+        app.mount("/admin", StaticFiles(directory=_WEB_DIR / "admin", html=True), name="admin")
+
+    # Narration mp3s referenced by the show rounds' ``audio`` field.
+    audio_dir = Path(settings.audio_dir)
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/audio", StaticFiles(directory=audio_dir), name="audio")
+
+    return app
+
+
+app = create_app()

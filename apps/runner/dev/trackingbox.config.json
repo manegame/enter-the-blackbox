@@ -1,0 +1,26 @@
+{
+  "calibration": {
+    "enabled": true,
+    "anchor": "bottom_center",
+    "floor_space": "normalized",
+    "image_points": [[0, 0], [1920, 0], [1920, 1080], [0, 1080]],
+    "floor_points": [[0, 0], [1, 0], [1, 1], [0, 1]],
+    "smoothing_alpha": 0.35
+  },
+  "zones": {
+    "enabled": true,
+    "default_zone": "outside",
+    "zones": [
+      {"id": "ritual", "label": "Ritual corner", "rect": [0, 0, 0.12, 0.12]}
+    ]
+  },
+  "pipeline": {
+    "source": "0",
+    "backend": "mock",
+    "mock_people": 24
+  },
+  "api": {
+    "host": "0.0.0.0",
+    "port": 8000
+  }
+}

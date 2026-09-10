@@ -1,0 +1,210 @@
+# blackbox-runner
+
+Interactive theater game server for 40+ simultaneous players. Positions come
+from [TrackingBox](https://github.com/ale-rls/TrackingBox) (anonymous GIDs
+over REST + WebSocket); players answer questions by physically moving into
+floor zones.
+
+TrackingBox is treated as a versioned, read-only sensor: this repo consumes
+its `/ws` and `/api/zones` endpoints and never modifies it for game features.
+
+**Pinned TrackingBox commit:** `95d092864ff8e24a2af9c33e662e547262692b04`
+(update this line, and re-validate the show, whenever the pin moves).
+
+## Architecture
+
+```
+                    ┌──────────────────────┐
+   camera ─────────▶│  TrackingBox (as-is) │───── /ws positions ────┐
+                    │  GIDs, zones, /ws    │                        │
+                    └──────────┬───────────┘                        │
+                               │ raw positions (direct, low-latency)│
+                               ▼                                    ▼
+                    ┌──────────────────┐  round/cue WS   ┌────────────────────┐
+                    │  TouchDesigner   │◀────────────────│  Game server (new) │
+                    │  screen visuals  │                 │  bindings, rounds, │
+                    └──────────────────┘                 │  scoring, PocketBase│
+                                                         └───┬──────────┬─────┘
+                                                             │          │
+                                                     player WS      admin WS/REST
+                                                             │          │
+                                                     ┌───────▼───┐ ┌────▼──────┐
+                                                     │ 40+ phone │ │ operator  │
+                                                     │ web pages │ │ dashboard │
+                                                     └───────────┘ └───────────┘
+```
+
+See [`docs/quickstart.md`](docs/quickstart.md) to get a dev setup running
+in five minutes, [`docs/architecture.md`](docs/architecture.md) for the full design plan
+(phases, data model, binding/rebind logic, testing strategy),
+[`docs/touchdesigner.md`](docs/touchdesigner.md) for the TD cue vocabulary,
+and **[`docs/runbook.md`](docs/runbook.md) if you're running the actual
+show** — start order, health checks, what to do when something dies, and
+the content freeze process.
+
+## Repo layout
+
+```
+server/
+  app.py               # FastAPI entry: player WS, TD WS, admin API
+  tracking_client.py   # WS client to TrackingBox: reconnect, snapshot resync
+  bindings.py          # player<->GID state machine
+  engine.py            # round state machine, timers, zone evaluation, scoring
+  pocketbase_client.py # PocketBase persistence: write-through, crash recovery
+  persistence.py       # (legacy) SQLite layer, superseded by PocketBase
+  replay.py            # post-show timeline / state-at-a-moment reconstruction
+  models.py            # pydantic models incl. copied TrackingBox message shapes
+  content.py           # validates rounds & questions (pydantic models)
+  content_db.py        # loads the show from the DB (runtime source of truth)
+frontend/
+  player/              # Svelte player app (Vite): claim flow, all question
+                       # forms, narration audio, PocketBase realtime for
+                       # scores/round state. `npm run build` -> dist/,
+                       # served by the game server at /p/{player_id} and
+                       # /listen for the live round monitor.
+web/
+  player/              # (legacy) phone page — served only if the Svelte
+                       # build (frontend/player/dist) is absent
+  admin/               # operator dashboard: round control, binding board,
+                        # floor map, TD cue log, scoreboard
+content/
+  show.yaml            # AUTHORING source: narration texts, questions, forms,
+                       # zone mapping. Edit here, then run
+                       # scripts/import_content.py to apply — the server
+                       # plays from the DB, not this file.
+  audio/               # voice-over mp3s, served at /audio/<name>.mp3
+                       # (override the folder with GAME_AUDIO_DIR; generate
+                       # via ElevenLabs from the admin console — see runbook)
+scripts/
+  validate_content.py  # check show.yaml against a running TrackingBox's zones
+  import_content.py    # push show.yaml into the game DB (the live content)
+  replay.py            # CLI for server/replay.py
+td_scripts/
+  td_receive_cues.py   # TouchDesigner WebSocket DAT callback for /ws/td
+tests/
+  scenarios/           # scripted GID-churn scenarios against the mock backend
+docs/
+  quickstart.md        # dev setup: mock TrackingBox + game server in 5 min
+  architecture.md      # the full design plan
+  touchdesigner.md     # TD cue vocabulary + setup
+  runbook.md           # ops runbook: start order, failure modes, replay
+```
+
+## Development
+
+Requires Python 3.11+ and a running TrackingBox instance (mock backend is
+fine for all development and load testing):
+
+```bash
+# in a TrackingBox checkout at the pinned commit — bare mock, no zones/floor
+audience-tracker serve --backend mock --port 8000
+
+# or, to exercise zone-based gameplay (answers require floor projection):
+audience-tracker serve --config /path/to/this/repo/dev/trackingbox.config.json --port 8000
+
+# in this repo — import the show content once, then boot
+make import-content
+make dev
+```
+
+`dev/trackingbox.config.json` enables calibration (an identity mapping, since
+the mock backend has no real camera) and defines the floor-marking zones
+(`scale_*`, `cross_*`, `ring_*`, plus the `ritual` corner) matching
+`content/show.yaml`. Without it, `floor_valid` stays false and no round can
+ever be answered — only useful for Phase 0/1-style connectivity checks.
+
+To enable ElevenLabs voice generation from the admin console, set
+`ELEVENLABS_API_KEY` (and usually `ELEVENLABS_VOICE_ID`; model defaults to
+`eleven_multilingual_v2`) — see `docs/runbook.md` for the workflow.
+
+`make dev` boots the game server against `ws://localhost:8000/ws`, loading
+the show from the game DB (validated against TrackingBox's `/api/zones` at
+startup — a content zone typo fails fast here rather than silently going
+unanswerable mid-show) and the admin dashboard at `/admin/`. The DB is
+seeded from the authoring copy with `make import-content` (or
+`python scripts/import_content.py`); re-run it after every `show.yaml`
+edit you want the server to pick up.
+
+Run tests with `make test`.
+
+### Personal audio streams
+
+Set `AUDIO_BRIDGE_URL`, `AUDIO_BRIDGE_TOKEN`, and `AUDIO_PUBLIC_URL` to enable
+the companion `blackbox-icecast` service. Every claimed player is allocated a
+continuous Icecast stream; opening a round injects that round's mp3 into each
+bound player's stream. If the bridge is disabled or unavailable, the existing
+browser-triggered mp3 path remains the degraded fallback.
+
+The bridge may run remotely on Coolify: the runner uploads the local MP3 over
+the authenticated API before issuing play commands, so TrackingBox and this
+runner can stay private on the venue network. See the companion
+`blackbox-icecast/COOLIFY.md` deployment guide.
+
+The operator dashboard also has a **Live personal audio** panel. Type an
+announcement, optionally select player ids and a voice, then click **Generate &
+play**. The runner calls ElevenLabs server-side, writes the resulting mp3 into
+the shared audio directory, and injects it immediately—no visit to the
+ElevenLabs site is needed.
+
+### Player frontend (SvelteKit)
+
+The player app lives in `frontend/player/` (SvelteKit, static SPA build).
+Routes: **`/` is the one link to hand to every new audience member** — it
+assigns a fresh seat id and redirects to `/p/{id}`; the id sticks in
+localStorage so re-opening the link returns the same seat. Ushers can
+still hand out explicit `/p/seat-12` links, which then become that
+phone's sticky seat.
+
+For rehearsals and failure-mode testing, `/listen` shows the current task
+without claiming a player seat. It follows the live round stream, exposes
+the current game state, and includes an audio player for narration.
+
+The production build is committed (`build/`), so running the show needs
+no Node — but after editing the frontend, rebuild and commit:
+
+```bash
+cd frontend/player
+npm install        # once
+npm run build      # writes build/, which the game server serves
+npm run dev        # dev server with proxy to a game server on :8100
+```
+
+It talks to the game server's REST/WS endpoints exactly like the legacy
+page, plus PocketBase realtime (public `rounds`/`score_events`
+collections — the browser holds no credentials; it learns the PocketBase
+URL from `GET /api/config`). If `build/` is missing, the server falls
+back to the archived `web/player/index.html`.
+
+**Standalone deployment** (e.g. a Coolify static site, separate from the
+game server): build with the game server's public URL baked in —
+
+```bash
+VITE_GAME_URL=https://game.example.com npm run build
+```
+
+— and deploy `build/` to any static host (SPA fallback to `index.html`).
+The game server allows cross-origin API calls, and audio/WS URLs are
+rewritten to point at `VITE_GAME_URL` automatically.
+
+Note: TrackingBox's default mock simulator churns GIDs quite aggressively
+(people can disappear and respawn sub-second). That's a good stress test —
+it's exactly what Phase 4's auto-rebind exists for — but makes manual
+single-player demos flaky if you're just claiming once and watching; favor
+scripted checks over live clicking when verifying binding behavior by hand.
+
+### Ritual rebind (Phase 4)
+
+Set `RITUAL_ZONE_ID` to enable the ritual rebind flow (an orphaned player —
+lost with no confident auto-rebind after `ORPHAN_AFTER_S` seconds, default
+3 — gets prompted to a lit corner; whichever unbound GID enters that zone
+resolves them). `dev/trackingbox.config.json` defines a `ritual` zone in
+the top-left corner for local testing:
+
+```bash
+RITUAL_ZONE_ID=ritual make dev
+```
+
+Other tunables (see `server/config.py`): `REBIND_MAX_DISTANCE` (normalized
+floor units, default 0.15), `REBIND_MAX_GAP_S` (default 8.0). These are
+exactly the thresholds §4.2/§7 of the design doc expect to be retuned from
+rehearsal telemetry — there's no "correct" value without a real venue.
