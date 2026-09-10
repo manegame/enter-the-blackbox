@@ -21,3 +21,18 @@ frontend, PocketBase, and the personal-audio stack.
 
 Service-specific development and operations instructions live in each
 directory's README.
+
+## Deploy
+
+The canonical public deployment is
+[`deploy/coolify/docker-compose.yml`](deploy/coolify/docker-compose.yml). It
+builds the frontend, PocketBase, Icecast, Liquidsoap, and the audio bridge from
+this repository. See [`deploy/coolify/README.md`](deploy/coolify/README.md) for
+the required domains, secrets, persistent volumes, and migration procedure.
+
+## Imported history
+
+The full histories of `blackbox-frontend`, `blackbox-runner`, and
+`blacbox-ice-soap-snake` remain reachable in this repository. The former
+repositories are retained as migration sources and should be archived after
+the monorepo deployment has been verified.

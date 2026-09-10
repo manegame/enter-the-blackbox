@@ -140,6 +140,12 @@ the authenticated API before issuing play commands, so TrackingBox and this
 runner can stay private on the venue network. See the companion
 `blackbox-icecast/COOLIFY.md` deployment guide.
 
+PocketBase can also run as a versioned Coolify service from this repository.
+The monorepo's pinned image applies committed schema migrations automatically
+on startup. Fresh-deployment and existing-database instructions are in
+[`services/pocketbase/README.md`](../../services/pocketbase/README.md); the
+combined public stack is under [`deploy/coolify/`](../../deploy/coolify/).
+
 The operator dashboard also has a **Live personal audio** panel. Type an
 announcement, optionally select player ids and a voice, then click **Generate &
 play**. The runner calls ElevenLabs server-side, writes the resulting mp3 into
