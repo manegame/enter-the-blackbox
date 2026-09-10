@@ -7,7 +7,7 @@ connect directly to the venue runner or TrackingBox.
 ## Create the resource
 
 1. In Coolify, create a Docker Compose application from this repository.
-2. Set the Compose location to `/docker-compose.coolify.yml`.
+2. Set the Compose location to `/apps/frontend/docker-compose.coolify.yml`.
 3. Assign the `frontend` service an HTTPS domain using internal port `80`, for
    example `https://play.example.org:80`.
 4. Add both variables below as build variables and deploy:

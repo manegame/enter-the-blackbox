@@ -3,7 +3,7 @@ name: blackbox-pocketbase
 services:
   pocketbase:
     build:
-      context: .
+      context: ./services/pocketbase
       dockerfile: Dockerfile
       args:
         PB_VERSION: ${PB_VERSION:-0.39.11}

@@ -7,6 +7,8 @@ venue Runner and TrackingBox remain private and connect outbound.
 
 1. In Coolify, create a Docker Compose resource from this repository.
 2. Set the Compose file to `/deploy/coolify/docker-compose.yml`.
+   Its build contexts are intentionally relative to the repository root,
+   matching Coolify's Compose execution model.
 3. Copy the variables from `deploy/coolify/.env.example` into Coolify. Replace
    every placeholder secret and set the real PocketBase and audio domains.
    Set `ICECAST_HOSTNAME` to the audio domain's hostname only, for example
