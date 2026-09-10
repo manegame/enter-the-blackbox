@@ -40,7 +40,7 @@ pip install -e .            # core serving layer + mock backend demo
 | Extra | Installs | For |
 |---|---|---|
 | `.[detect]` | YOLO11 + ByteTrack (no ReID) | Windows/TouchDesigner box (pair with a CUDA torch wheel) |
-| `.[reid]`   | torchreid | add OSNet ReID on top of `[detect]` |
+| `.[reid]`   | torchreid + its model-weight downloader | add OSNet ReID on top of `[detect]` |
 | `.[ml]`     | full real stack: YOLO11m + ByteTrack + OSNet | GPU worker |
 | `.[agent]`  | OpenCV capture deps | venue Capture Agent (Modal path) |
 | `.[deploy]` | Modal SDK | deploying to Modal |

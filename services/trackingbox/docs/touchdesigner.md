@@ -44,7 +44,7 @@ services\trackingbox\scripts\install_windows.bat -Reid
 Sanity-check anytime:
 
 ```bat
-services\trackingbox\.venv\Scripts\audience-tracker doctor
+services\trackingbox\.venv\Scripts\audience-tracker doctor --require reid
 ```
 
 ## Build the TouchDesigner video path
@@ -234,6 +234,7 @@ Run `audience-tracker doctor` first; it pinpoints most setup issues.
 | Video Stream In TOP stays black | Service down or wrong URL | Check `http://localhost:8000/health`; URL must be `http://localhost:8000/video`. |
 | WebSocket DAT will not connect | Wrong address/port or firewall | Use `localhost` / `8000` / `/ws`; allow Python through Windows Firewall. |
 | Audience table stops refreshing | WebSocket DAT dropped and did not reconnect | Enable auto-reconnect on the WebSocket DAT, then pulse Active off/on. The server resends a full snapshot after reconnect. |
+| `ModuleNotFoundError: No module named 'gdown'` | An older ReID install is missing torchreid's weight downloader | Run `services\trackingbox\.venv\Scripts\python -m pip install gdown`, then start TrackingBox again. |
 | `pip install .[reid]` fails | `torchreid` build issue on Windows | Keep `reid` set to `0`, or install `deep-person-reid` from source. |
 | Small/distant people missed | Detection input too low-res | Raise `image_size` to `1280`; lower `confidence`. |
 | Need more FPS | Model/input too heavy | Lower `image_size`, keep ReID off, ensure CUDA is active. |
