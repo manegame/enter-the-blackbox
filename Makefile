@@ -1,4 +1,4 @@
-.PHONY: setup tracking tracking-ml runner validate-content import-content test test-runner test-tracking
+.PHONY: setup tracking tracking-td tracking-ml runner validate-content import-content test test-runner test-tracking
 
 PYTHON ?= python3
 RUNNER_DIR := apps/runner
@@ -9,6 +9,8 @@ RUNNER_READY := $(RUNNER_VENV)/.blackbox-ready
 TRACKER_READY := $(TRACKER_VENV)/.blackbox-ready
 TRACKER_CONFIG ?= $(RUNNER_DIR)/dev/trackingbox.config.json
 TRACKER_PORT ?= 8000
+TRACKER_RTSP_URL ?= rtsp://127.0.0.1:8554/audience
+TRACKER_DEVICE ?= cuda
 RUNNER_PORT ?= 8100
 
 setup: $(RUNNER_READY) $(TRACKER_READY)
@@ -27,10 +29,15 @@ $(TRACKER_READY): $(TRACKER_DIR)/pyproject.toml
 	$(TRACKER_VENV)/bin/pip install -e "$(TRACKER_DIR)[dev]" -q
 	@touch $(TRACKER_READY)
 
-# Synthetic tracking with all show zones. Override TRACKER_CONFIG with the
-# calibrated venue config for a real performance.
+# Synthetic tracking with all show zones. This target never opens a camera;
+# use tracking-td with the calibrated venue config for a real performance.
 tracking: $(TRACKER_READY)
-	cd $(TRACKER_DIR) && "$(CURDIR)/$(TRACKER_VENV)/bin/audience-tracker" serve --config "$(abspath $(TRACKER_CONFIG))" --port $(TRACKER_PORT)
+	cd $(TRACKER_DIR) && "$(CURDIR)/$(TRACKER_VENV)/bin/audience-tracker" serve --config "$(abspath $(TRACKER_CONFIG))" --backend mock --port $(TRACKER_PORT)
+
+# TouchDesigner owns the physical camera and publishes its raw TOP through a
+# Video Stream Out TOP. TrackingBox only opens this RTSP stream.
+tracking-td: $(TRACKER_READY)
+	cd $(TRACKER_DIR) && "$(CURDIR)/$(TRACKER_VENV)/bin/audience-tracker" serve --config "$(abspath $(TRACKER_CONFIG))" --backend real --device "$(TRACKER_DEVICE)" --source "$(TRACKER_RTSP_URL)" --port $(TRACKER_PORT)
 
 # Install the heavy detection/ReID dependencies needed by a real camera setup.
 tracking-ml: $(TRACKER_READY)

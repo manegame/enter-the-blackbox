@@ -77,11 +77,12 @@ Two deployment paths, both consuming frames through the same transport-agnostic
 
 * **[Run with TouchDesigner](docs/touchdesigner.md)** *(local, no cloud)* — the
   whole pipeline runs on the venue PC with full ReID; TouchDesigner is the
-  camera/renderer, bridged over WebSocket on `localhost`. The venue setup.
+  sole camera owner and publishes raw RTSP to TrackingBox; positions return
+  over WebSocket on `localhost`. The venue setup.
 * **[Run on Modal](docs/modal.md)** *(cloud GPU)* — a venue Capture Agent streams
   frames to a Modal worker over a long-lived WebSocket. Not currently used.
 
-Built for multi-hour live shows: camera hiccups are retried and the device
+Built for multi-hour live shows: source hiccups are retried and the stream
 reopened automatically, a bad frame never kills the pipeline (persistent faults
 surface in `/health` as `pipeline_running: false`), and GIDs survive short
 detection misses — with ReID appearance-checking a track that reappears, so a

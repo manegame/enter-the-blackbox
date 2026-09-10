@@ -14,24 +14,15 @@ its `/ws` and `/api/zones` endpoints and never modifies it for game features.
 ## Architecture
 
 ```
-                    ┌──────────────────────┐
-   camera ─────────▶│  TrackingBox (as-is) │───── /ws positions ────┐
-                    │  GIDs, zones, /ws    │                        │
-                    └──────────┬───────────┘                        │
-                               │ raw positions (direct, low-latency)│
-                               ▼                                    ▼
-                    ┌──────────────────┐  round/cue WS   ┌────────────────────┐
-                    │  TouchDesigner   │◀────────────────│  Game server (new) │
-                    │  screen visuals  │                 │  bindings, rounds, │
-                    └──────────────────┘                 │  scoring, PocketBase│
-                                                         └───┬──────────┬─────┘
-                                                             │          │
-                                                     player WS      admin WS/REST
-                                                             │          │
-                                                     ┌───────▼───┐ ┌────▼──────┐
-                                                     │ 40+ phone │ │ operator  │
-                                                     │ web pages │ │ dashboard │
-                                                     └───────────┘ └───────────┘
+   camera ──▶ [ TouchDesigner ] ── unannotated RTSP ──▶ [ TrackingBox ]
+                       ▲                                  │
+                       └──────── /ws positions ───────────┘
+                       ▲
+                       └──────── round/cue WS ─────── [ Game server ]
+                                                          │
+                                                 ┌────────┴────────┐
+                                                 ▼                 ▼
+                                            40+ phones      admin dashboard
 ```
 
 See [`docs/quickstart.md`](docs/quickstart.md) to get a dev setup running

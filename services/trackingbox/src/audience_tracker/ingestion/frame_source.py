@@ -92,7 +92,12 @@ class OpenCVFrameSource(_FiniteFrameSource):
         self._failures = 0
         self._cap = self._open()
         if not self._cap.isOpened():
-            raise RuntimeError(f"Could not open video source: {source!r}")
+            if not self._live:
+                raise RuntimeError(f"Could not open video source: {source!r}")
+            # A live publisher (notably TouchDesigner's RTSP TOP) may come up a
+            # moment after this service. Keep the pipeline alive; next_frame()
+            # will periodically reopen the source until it becomes available.
+            log.warning("Live video source %r is not ready — waiting and retrying", source)
 
     def _open(self):
         import cv2  # local import: only the venue/GPU box has OpenCV

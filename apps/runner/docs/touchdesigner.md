@@ -2,10 +2,16 @@
 
 TouchDesigner needs two independent connections:
 
+The camera path comes first: TouchDesigner owns the physical device through a
+Video Device In TOP, branches that TOP into the visuals, and publishes an
+unannotated H.264 copy from a Video Stream Out TOP at
+`rtsp://127.0.0.1:8554/audience` for TrackingBox. Full setup is in the embedded
+[`services/trackingbox` runbook](../../../services/trackingbox/docs/touchdesigner.md).
+
 * **Raw positions**, straight from TrackingBox (`ws://localhost:8000/ws`) —
   unchanged from TrackingBox's own setup. See
-  [TrackingBox's touchdesigner.md](https://github.com/ale-rls/TrackingBox/blob/main/docs/touchdesigner.md)
-  and `td_scripts/td_receive_state.py` in that repo for GID/floor/zone
+  the embedded TrackingBox runbook linked above and
+  `services/trackingbox/td_scripts/td_receive_state.py` for GID/floor/zone
   instancing.
 * **Round/cue events**, from this game server (`ws://localhost:8100/ws/td`)
   — round state, live zone counts for bar visuals, and reveal/score

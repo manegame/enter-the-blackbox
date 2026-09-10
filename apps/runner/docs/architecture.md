@@ -6,37 +6,28 @@ Players answer questions by physically moving into floor zones. Competitive
 scoring. Everything runs on one venue machine. TouchDesigner renders visuals;
 each player has a phone open on a personal web page.
 
-**Decision already made.** The game lives in a separate repo, as a separate
-FastAPI service that consumes TrackingBox over its WebSocket. TrackingBox is
-treated as a versioned, read-only sensor — we pin the commit we run against
-and never modify it for game features.
+**Decision already made.** The game is a separate FastAPI service inside the
+monorepo that consumes TrackingBox over its WebSocket. TrackingBox remains a
+separate runtime service and is never modified for game features.
 
 ## 1. Architecture
 
 ```
-                    ┌──────────────────────┐
-   camera ─────────▶│  TrackingBox (as-is) │───── /ws positions ────┐
-                    │  GIDs, zones, /ws    │                        │
-                    └──────────┬───────────┘                        │
-                               │ raw positions (direct, low-latency)│
-                               ▼                                    ▼
-                    ┌──────────────────┐  round/cue WS   ┌────────────────────┐
-                    │  TouchDesigner   │◀────────────────│  Game server (new) │
-                    │  screen visuals  │                 │  bindings, rounds, │
-                    └──────────────────┘                 │  scoring, SQLite   │
-                                                         └───┬──────────┬─────┘
-                                                             │          │
-                                                     player WS      admin WS/REST
-                                                             │          │
-                                                     ┌───────▼───┐ ┌────▼──────┐
-                                                     │ 40+ phone │ │ operator  │
-                                                     │ web pages │ │ dashboard │
-                                                     └───────────┘ └───────────┘
+   camera ──▶ [ TouchDesigner ] ── unannotated RTSP ──▶ [ TrackingBox ]
+                       ▲                                  │
+                       └──────── /ws positions ───────────┘
+                       ▲
+                       └──────── round/cue WS ─────── [ Game server ]
+                                                          │
+                                                 ┌────────┴────────┐
+                                                 ▼                 ▼
+                                            40+ phones      admin dashboard
 ```
 
-* TouchDesigner keeps reading raw per-frame positions directly from
-  TrackingBox (`/ws`) for smooth visuals, and gets game state (round, cues,
-  reveal moments) from the game server.
+* TouchDesigner is the sole owner of the physical camera. It branches the raw
+  TOP into its visuals and an H.264 RTSP output for TrackingBox.
+* TouchDesigner reads per-frame positions from TrackingBox (`/ws`) and game
+  state (rounds, cues, reveal moments) from the game server.
 * Phones and the admin dashboard talk only to the game server.
 * The game server subscribes to TrackingBox `/ws` (snapshot on connect, then
   change events + heartbeat snapshots) and to `/api/zones` for the zone map.

@@ -24,17 +24,20 @@ make sure `POCKETBASE_URL` / `POCKETBASE_ADMIN_EMAIL` /
 reachable, or the game server refuses to start (deliberately: there is no
 degraded mode without persistence).
 
-Start the personal-audio stack and TrackingBox **first**, wait for both to be
-healthy, **then** start the game server. Starting them the other way round isn't harmful (the game
-server retries the connection), but it makes the first couple of minutes
-of logs confusing.
+Start the personal-audio stack, TouchDesigner's camera/RTSP output, and
+TrackingBox **first**. Wait for tracking to be healthy, **then** start the game
+server. The game server retries its connection, but the explicit order makes
+camera ownership and show diagnostics predictable.
 
 ```bash
 # 1. Public personal audio
 curl https://audio.example.org/health
 
-# 2. From the monorepo root, with the venue's calibrated config
-make tracking TRACKER_CONFIG=/absolute/path/to/venue-config.json
+# 2. Start TouchDesigner. Confirm audience_camera is live and the
+# audience_rtsp_out TOP is Active at rtsp://127.0.0.1:8554/audience.
+
+# 3. From the monorepo root, with the venue's calibrated config
+make tracking-td TRACKER_CONFIG=/absolute/path/to/venue-config.json
 
 # check it's alive before moving on:
 curl http://localhost:8000/health
@@ -42,11 +45,24 @@ curl http://localhost:8000/health
 #   pipeline_running:false means tracking died while the API stayed up — see
 #   "TrackingBox is up but nobody is being tracked" below.
 
-# 3. In another terminal, from the monorepo root
+# 4. In another terminal, from the monorepo root
 make runner
 
 curl http://localhost:8100/health
 #   {"status":"ok","tracking_connected":true,"tracking_ws_url":"..."}
+```
+
+On the Windows show machine, steps 3 and 4 are:
+
+```powershell
+# Terminal 1, from the monorepo root, after audience_rtsp_out is Active
+.\services\trackingbox\scripts\run_windows.bat `
+  --config "C:\show\venue-config.json"
+
+# Terminal 2
+Set-Location apps\runner
+.venv\Scripts\python.exe -m uvicorn server.app:app `
+  --host 0.0.0.0 --port 8100
 ```
 
 Open the admin dashboard: `http://localhost:8100/admin/`. The binding
@@ -173,11 +189,12 @@ reconnects automatically, gets a fresh snapshot, and the auto-rebind/
 ritual flow takes it from there. You don't need to restart the game
 server for this.
 
-**TrackingBox is up but nobody is being tracked.** `curl .../health` shows
-`"pipeline_running": false` — the tracking thread died but the API stayed
-alive. This means a persistent camera fault (unplugged, driver crash).
-Check the TrackingBox terminal output, fix the camera connection, and
-restart TrackingBox.
+**TrackingBox is up but nobody is being tracked.** First confirm
+`audience_camera` is producing frames and `audience_rtsp_out` is Active in
+TouchDesigner. TrackingBox keeps retrying a missing RTSP publisher, so restoring
+the TOP should recover without a tracker restart. If `/health` instead shows
+`"pipeline_running": false`, check the TrackingBox terminal for an inference or
+decode failure and restart it after correcting the error.
 
 **Game server process dies.** Restart it (`make runner` again, or however
 your venue script launches it). See

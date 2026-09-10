@@ -23,12 +23,13 @@ IMG = np.zeros((4, 4, 3), dtype=np.uint8)
 class FakeCapture:
     """Scriptable cv2.VideoCapture: read() pops an image or None (= failure)."""
 
-    def __init__(self, reads):
+    def __init__(self, reads, opened=True):
         self._reads = list(reads)
+        self._opened = opened
         self.released = False
 
     def isOpened(self):
-        return True
+        return self._opened
 
     def set(self, prop, value):
         pass
@@ -78,6 +79,25 @@ def test_live_camera_reopens_after_repeated_failures(monkeypatch):
     assert dead.released is True           # reopened after _REOPEN_AFTER failures
     assert src.next_frame() is not None    # the new capture delivers
     assert src.exhausted is False
+
+
+def test_live_rtsp_can_start_before_publisher_and_reconnect(monkeypatch):
+    missing = FakeCapture([], opened=False)
+    live = FakeCapture([IMG])
+    src = make_source(monkeypatch, [missing, live], "rtsp://127.0.0.1:8554/audience")
+
+    for _ in range(3):
+        assert src.next_frame() is None
+
+    assert missing.released is True
+    assert src.next_frame() is not None
+    assert src.exhausted is False
+
+
+def test_missing_file_still_fails_at_startup(monkeypatch):
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2([FakeCapture([], opened=False)]))
+    with pytest.raises(RuntimeError, match="Could not open video source"):
+        OpenCVFrameSource("missing.mp4")
 
 
 def test_file_source_read_failure_means_eof(monkeypatch):

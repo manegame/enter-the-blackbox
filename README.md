@@ -40,13 +40,17 @@ make tracking   # synthetic audience; no camera or GPU
 make runner     # venue game server and admin UI on :8100
 ```
 
-For a real performance, first install TrackingBox's ML dependencies and pass
-the calibrated venue configuration:
+For a real performance, TouchDesigner owns the camera and publishes
+`rtsp://127.0.0.1:8554/audience`. First install TrackingBox's ML dependencies,
+then pass the calibrated venue configuration:
 
 ```bash
 make tracking-ml
-make tracking TRACKER_CONFIG=/absolute/path/to/venue-config.json
+make tracking-td TRACKER_CONFIG=/absolute/path/to/venue-config.json
 ```
+
+See [`services/trackingbox/docs/touchdesigner.md`](services/trackingbox/docs/touchdesigner.md)
+for the TouchDesigner TOP setup and Windows commands.
 
 ## Deploy
 

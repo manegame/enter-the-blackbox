@@ -55,9 +55,15 @@ curl http://localhost:8000/health
 # {"status":"ok","pipeline":true,"pipeline_running":true}
 ```
 
-For a real camera, run `make tracking-ml` once, then start with
-`make tracking TRACKER_CONFIG=/absolute/path/to/venue-config.json`. Its zone IDs
-must match `apps/runner/content/show.yaml` or validation will fail.
+For a real camera, TouchDesigner owns the device and publishes a Video Stream
+Out TOP at `rtsp://127.0.0.1:8554/audience`. Run `make tracking-ml` once, then:
+
+```bash
+make tracking-td TRACKER_CONFIG=/absolute/path/to/venue-config.json
+```
+
+Its zone IDs must match `apps/runner/content/show.yaml` or validation will fail.
+See `services/trackingbox/docs/touchdesigner.md` for the TOP and Windows setup.
 
 ## 3. Start the game server
 
