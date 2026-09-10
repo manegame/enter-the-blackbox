@@ -9,6 +9,8 @@ venue Runner and TrackingBox remain private and connect outbound.
 2. Set the Compose file to `/deploy/coolify/docker-compose.yml`.
 3. Copy the variables from `deploy/coolify/.env.example` into Coolify. Replace
    every placeholder secret and set the real PocketBase and audio domains.
+   Set `ICECAST_HOSTNAME` to the audio domain's hostname only, for example
+   `audio.example.org` (no `https://`, path, or port).
 4. Assign HTTPS domains to:
    - `frontend`, internal port `80`, for example `play.example.org`;
    - `pocketbase`, internal port `8090`, for example `pb.example.org`;
