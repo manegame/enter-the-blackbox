@@ -76,6 +76,11 @@ Keep the RTSP output active before starting or restarting TrackingBox. A Video
 Stream Out TOP uses Nvidia hardware encoding on Windows, so watch GPU encoder
 load during rehearsal as well as TrackingBox's inference FPS.
 
+TrackingBox drains RTSP video on a dedicated capture thread and keeps only the
+newest decoded frame for detection. This prevents slow inference from backing
+up the stream and causing decoder errors or read timeouts. When detection runs
+slower than the camera, intermediate frames are intentionally skipped.
+
 ## Start TrackingBox manually
 
 From the monorepo root, after the RTSP output is active:
