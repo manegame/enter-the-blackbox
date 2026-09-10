@@ -12,6 +12,12 @@ export const GAME_URL = import.meta.env.VITE_GAME_URL || "";
 // back to asking the game server via /api/config.
 export const POCKETBASE_URL = import.meta.env.VITE_POCKETBASE_URL || "";
 
+// Public base of the personal-audio bridge, e.g. https://audio.example.com.
+// The phone keeps GET /stream/<player-id> playing continuously; the bridge
+// proxies an allocated Icecast mount. In same-origin runner builds
+// this can be discovered from /api/config instead.
+export const AUDIO_STREAM_BASE = import.meta.env.VITE_AUDIO_STREAM_BASE || "";
+
 export function gameFetch(path, opts) {
   return fetch(`${GAME_URL}${path}`, opts);
 }
@@ -27,4 +33,16 @@ export function gameWsUrl(path) {
   if (GAME_URL) return GAME_URL.replace(/^http/, "ws") + path;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}${path}`;
+}
+
+export async function resolveAudioStreamBase() {
+  if (AUDIO_STREAM_BASE) return AUDIO_STREAM_BASE.replace(/\/$/, "");
+  try {
+    const response = await gameFetch("/api/config");
+    if (!response.ok) return "";
+    const config = await response.json();
+    return (config.audio_stream_base || "").replace(/\/$/, "");
+  } catch {
+    return "";
+  }
 }

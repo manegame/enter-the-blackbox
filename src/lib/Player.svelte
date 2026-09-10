@@ -1,7 +1,7 @@
 <script>
   import ClaimForm from "$lib/components/ClaimForm.svelte";
   import RoundPanel from "$lib/components/RoundPanel.svelte";
-  import { audio, attachElement, unlockAudio, playAudio, roundAudioSrc } from "$lib/audio.svelte.js";
+  import { audio, attachElement, attachStreamElement, configurePersonalStream, unlockAudio, playAudio, roundAudioSrc } from "$lib/audio.svelte.js";
   import { connectPlayer, submitClaim } from "$lib/pb.js";
   import { onMount } from "svelte";
 
@@ -14,6 +14,7 @@
   let score = $state(0);
   let available = $state(null);   // claimable GIDs; null until game_state loads
   let narrationEl = $state(null);
+  let streamEl = $state(null);
 
   // Which round's narration/question audio we've already started, so a fresh
   // active round (or binding into one already running) plays exactly once.
@@ -27,6 +28,12 @@
   const ritual = $derived(player?.state === "orphaned");
 
   $effect(() => { if (narrationEl) attachElement(narrationEl); });
+  $effect(() => { if (streamEl) attachStreamElement(streamEl); });
+  // A returning already-bound player has no claim tap to unlock playback.
+  // Ask once up front so the continuous channel is ready for ad-hoc audio.
+  $effect(() => {
+    if (bound && audio.streamUrl && !audio.unlocked) audio.overlayVisible = true;
+  });
 
   function playRoundOnce(payload) {
     if (payload && payload.state === "active" && playedRoundId !== payload.round_id) {
@@ -60,6 +67,7 @@
   }
 
   onMount(() => {
+    configurePersonalStream(playerId);
     connectPlayer({
       playerId,
       onPlayer: applyPlayer,
@@ -107,3 +115,4 @@
 </main>
 
 <audio bind:this={narrationEl} id="narration" preload="auto"></audio>
+<audio bind:this={streamEl} id="personal-stream" preload="none"></audio>

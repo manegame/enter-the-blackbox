@@ -10,3 +10,5 @@
   # NOTE: this endpoint 503s until the PocketBase service in Coolify is
   # given an https domain (Let's Encrypt works with sslip.io hosts).
   VITE_POCKETBASE_URL = "https://pocketbase-dk4skckwkc88k0csg4o8ck4s.46.62.242.241.sslip.io"
+  # Configure VITE_AUDIO_STREAM_BASE in Netlify for the public HTTPS reverse
+  # proxy to blackbox-icecast. If absent, cue-file playback remains the fallback.
